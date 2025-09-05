@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>2048 — single file</title>
+  <style>
+    :root{--bg:#0b0e11;--board:#0f141a;--cell:#0b0f14;--text:#eaf1f7;--muted:#94a3b8}
+    *{box-sizing:border-box}
+    body{margin:0;display:grid;place-items:center;min-height:100vh;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Hiragino Sans',Meiryo,sans-serif}
+    .wrap{width:min(92vw,540px);display:grid;gap:12px}
+    header{display:flex;justify-content:space-between;align-items:end}
+    h1{margin:0;font-weight:800}
+    .scores{display:flex;gap:8px}
+    .box{background:#111827;border:1px solid #1f2937;border-radius:8px;padding:8px 10px;text-align:center}
+    .box b{display:block;font-size:22px}
+    .board{position:relative;background:var(--board);border:1px solid #1f2937;border-radius:10px;padding:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+    .cell{background:var(--cell);border:1px solid #111827;border-radius:8px;position:relative;aspect-ratio:1}
+    .tile{position:absolute;inset:0;display:grid;place-items:center;font-weight:800;font-size:28px;border-radius:8px;transition:transform .12s ease, opacity .12s ease;will-change:transform,opacity}
+    .tile.new{transform:scale(.4);opacity:0}
+    .tile.pop{animation:pop .12s ease}
+    @keyframes pop{from{transform:scale(1.06)}to{transform:scale(1)}}
+    .controls{display:flex;gap:8px;justify-content:space-between;align-items:center}
+    button{appearance:none;background:#0d1117;color:var(--text);border:1px solid #1f2937;border-radius:8px;padding:8px 10px;font-weight:700;cursor:pointer}
+    button.primary{background:#f59e0b;color:#231504;border-color:transparent}
+    .muted{color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>2048</h1>
+      <div class="scores">
+        <div class="box"><div class="muted">SCORE</div><b id="score">0</b></div>
+        <div class="box"><div class="muted">BEST</div><b id="best">0</b></div>
+      </div>
+    </header>
+    <div class="board" id="board"></div>
+    <div class="controls">
+      <div class="muted">矢印キー / スワイプで移動</div>
+      <div style="display:flex;gap:8px"><button id="undo">元に戻す</button><button id="new" class="primary">新しいゲーム</button></div>
+    </div>
+  </div>
+
+  <script>
+    ;(() => {
+      const board = document.getElementById('board'); const scoreEl = document.getElementById('score'); const bestEl = document.getElementById('best')
+      const undoBtn = document.getElementById('undo'); const newBtn = document.getElementById('new')
+      const sz=4
+      const colors = { 2:'#1f2937',4:'#334155',8:'#f59e0b',16:'#fb923c',32:'#f97316',64:'#ef4444',128:'#a78bfa',256:'#60a5fa',512:'#34d399',1024:'#22c55e',2048:'#eab308' }
+      let grid, score, best = +localStorage.getItem('2048_best')||0, prev=null
+      let spawnPos=null, popSet=new Set(), animating=false
+
+      function init(){
+        grid=Array.from({length:sz},()=>Array(sz).fill(0)); score=0; bestEl.textContent=best
+        spawn(); spawn(); render()
+      }
+      function spawn(){ const empty=[]; for(let r=0;r<sz;r++)for(let c=0;c<sz;c++) if(grid[r][c]===0) empty.push([r,c]); if(!empty.length) return; const [r,c]=empty[(Math.random()*empty.length)|0]; grid[r][c] = Math.random()<0.9?2:4; spawnPos=[r,c] }
+
+      function render(){
+        board.innerHTML=''; scoreEl.textContent=score; if(score>best){ best=score; localStorage.setItem('2048_best',best); bestEl.textContent=best }
+        for(let i=0;i<sz*sz;i++){ const cell=document.createElement('div'); cell.className='cell'; board.appendChild(cell) }
+        for(let r=0;r<sz;r++)for(let c=0;c<sz;c++){
+          const v=grid[r][c]; if(!v) continue
+          const el=document.createElement('div'); el.className='tile'; el.style.background=colors[v]||'#a3e635'; el.textContent=v
+          if(spawnPos && spawnPos[0]===r && spawnPos[1]===c){ el.classList.add('new'); requestAnimationFrame(()=> el.classList.remove('new')) }
+          if(popSet.has(r+","+c)){ requestAnimationFrame(()=> el.classList.add('pop')); setTimeout(()=> el&&el.classList&&el.classList.remove('pop'), 160) }
+          board.children[r*sz+c].appendChild(el)
+        }
+        spawnPos=null; popSet.clear()
+      }
+
+      function move(dir){ // dir: 'L','R','U','D'
+        if(animating) return
+        prev = { grid: grid.map(row=>row.slice()), score }
+        const actions=[] // {from:[r,c], to:[r,c], merge:boolean}
+        const ng = Array.from({length:sz},()=>Array(sz).fill(0))
+        const mergedFlag = Array.from({length:sz},()=>Array(sz).fill(false))
+        function processLine(indices){
+          const vals = indices.map(([r,c])=> grid[r][c])
+          const nonzero = []
+          for(let i=0;i<vals.length;i++){ if(vals[i]) nonzero.push({v:vals[i], i}) }
+          let write=0
+          for(let k=0;k<nonzero.length;k++){
+            const curv = nonzero[k].v
+            if(write>0){ const [pr,pc]=indices[write-1]; if(ng[pr][pc]===curv && !mergedFlag[pr][pc]){ ng[pr][pc]=curv*2; mergedFlag[pr][pc]=true; score+=curv*2; const [fr,fc]=indices[nonzero[k].i]; actions.push({from:[fr,fc], to:[pr,pc], merge:true}); continue } }
+            const [tr,tc]=indices[write]; ng[tr][tc]=curv; const [fr,fc]=indices[nonzero[k].i]; actions.push({from:[fr,fc], to:[tr,tc], merge:false}); write++
+          }
+        }
+        if(dir==='L'){
+          for(let r=0;r<sz;r++){ const idx = Array.from({length:sz},(_,c)=>[r,c]); processLine(idx) }
+        }else if(dir==='R'){
+          for(let r=0;r<sz;r++){ const idx = Array.from({length:sz},(_,c)=>[r,sz-1-c]); processLine(idx) }
+        }else if(dir==='U'){
+          for(let c=0;c<sz;c++){ const idx = Array.from({length:sz},(_,r)=>[r,c]); processLine(idx) }
+        }else if(dir==='D'){
+          for(let c=0;c<sz;c++){ const idx = Array.from({length:sz},(_,r)=>[sz-1-r,c]); processLine(idx) }
+        }
+        // moved?
+        let moved=false; for(let r=0;r<sz;r++) for(let c=0;c<sz;c++) if(ng[r][c]!==grid[r][c]){ moved=true; break }
+        if(!moved) return
+
+        // animate: translate tiles from from->to
+        animating=true
+        const cells = [...board.children]
+        function cellRect([r,c]){ const el = cells[r*sz+c]; return el.getBoundingClientRect() }
+        actions.forEach(a => {
+          const srcCell = cells[a.from[0]*sz + a.from[1]]
+          const tile = srcCell.querySelector('.tile')
+          if(!tile) return
+          const r1 = cellRect(a.from), r2 = cellRect(a.to)
+          const dx = r2.left - r1.left, dy = r2.top - r1.top
+          tile.style.transform = `translate(${dx}px, ${dy}px)`
+        })
+        setTimeout(()=>{
+          grid = ng
+          popSet = new Set(actions.filter(a=>a.merge).map(a=> a.to.join(',')))
+          spawn(); render(); checkEnd(); animating=false
+        }, 130)
+      }
+
+      function checkEnd(){
+        for(let r=0;r<sz;r++)for(let c=0;c<sz;c++) if(grid[r][c]===0) return
+        for(let r=0;r<sz;r++)for(let c=0;c<sz-1;c++) if(grid[r][c]===grid[r][c+1]) return
+        for(let c=0;c<sz;c++)for(let r=0;r<sz-1;r++) if(grid[r][c]===grid[r+1][c]) return
+        setTimeout(()=>alert('ゲームオーバー'), 10)
+      }
+
+      document.addEventListener('keydown', e => { if(animating) return; const k=e.key; if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(k)){ e.preventDefault(); move({ArrowLeft:'L',ArrowRight:'R',ArrowUp:'U',ArrowDown:'D'}[k]) } })
+      // touch
+      let sx,sy
+      board.addEventListener('touchstart', e => { const t=e.changedTouches[0]; sx=t.clientX; sy=t.clientY })
+      board.addEventListener('touchend', e => { if(animating) return; const t=e.changedTouches[0]; const dx=t.clientX-sx, dy=t.clientY-sy; if(Math.hypot(dx,dy)<24) return; const adx=Math.abs(dx), ady=Math.abs(dy); if(adx>ady) move(dx>0?'R':'L'); else move(dy>0?'D':'U') })
+
+      undoBtn.addEventListener('click', ()=>{ if(animating) return; if(prev){ grid=prev.grid.map(r=>r.slice()); score=prev.score; render() } })
+      newBtn.addEventListener('click', ()=>{ if(animating) return; init() })
+
+      init()
+    })()
+  </script>
+</body>
+</html>
+
