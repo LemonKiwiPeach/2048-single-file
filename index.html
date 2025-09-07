@@ -2,11 +2,12 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>2048 — single file</title>
   <style>
     :root{--bg:#0b0e11;--board:#0f141a;--cell:#0b0f14;--text:#eaf1f7;--muted:#94a3b8}
     *{box-sizing:border-box}
+    html,body{height:100%; overflow:hidden; overscroll-behavior-y: contain; overscroll-behavior: none}
     body{margin:0;display:grid;place-items:center;min-height:100vh;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Hiragino Sans',Meiryo,sans-serif}
     .wrap{width:min(92vw,540px);display:grid;gap:12px}
     header{display:flex;justify-content:space-between;align-items:end}
@@ -14,7 +15,7 @@
     .scores{display:flex;gap:8px}
     .box{background:#111827;border:1px solid #1f2937;border-radius:8px;padding:8px 10px;text-align:center}
     .box b{display:block;font-size:22px}
-    .board{position:relative;background:var(--board);border:1px solid #1f2937;border-radius:10px;padding:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+    .board{position:relative;background:var(--board);border:1px solid #1f2937;border-radius:10px;padding:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:10px;touch-action:none;overscroll-behavior:contain}
     .cell{background:var(--cell);border:1px solid #111827;border-radius:8px;position:relative;aspect-ratio:1}
     .tile{position:absolute;inset:0;display:grid;place-items:center;font-weight:800;font-size:28px;border-radius:8px;transition:transform .12s ease, opacity .12s ease;will-change:transform,opacity}
     .tile.new{transform:scale(.4);opacity:0}
@@ -49,10 +50,135 @@
       const sz=4
       const colors = { 2:'#1f2937',4:'#334155',8:'#f59e0b',16:'#fb923c',32:'#f97316',64:'#ef4444',128:'#a78bfa',256:'#60a5fa',512:'#34d399',1024:'#22c55e',2048:'#eab308' }
       let grid, score, best = +localStorage.getItem('2048_best')||0, prev=null
-      let spawnPos=null, popSet=new Set(), animating=false
+      let spawnPos=null, popSet=new Set(), animating=false, over=false, won=false
+
+      // --- Sound (WebAudio) — less mechanical, more juicy ---
+      let AC=null, master=null, comp=null
+      function ensureAudio(){
+        try{
+          if(!AC){
+            AC = new (window.AudioContext||window.webkitAudioContext)();
+            master = AC.createGain(); master.gain.value = 0.24;
+            comp = AC.createDynamicsCompressor();
+            comp.threshold.value = -24; comp.knee.value=20; comp.ratio.value=4; comp.attack.value=0.003; comp.release.value=0.08;
+            master.connect(comp).connect(AC.destination);
+          }
+          if(AC.state==='suspended') AC.resume()
+        }catch{}
+      }
+      function midiToFreq(n){ return 440 * Math.pow(2,(n-69)/12) }
+      function tone(t, midi, dur, vol, pan=0){
+        try{
+          const f=midiToFreq(midi); const o1=AC.createOscillator(), o2=AC.createOscillator();
+          const g=AC.createGain(); const p=AC.createStereoPanner(); const filt=AC.createBiquadFilter();
+          o1.type='triangle'; o2.type='sine'; o1.frequency.setValueAtTime(f, t); o2.frequency.setValueAtTime(f*1.005, t);
+          // filter sweep for a soft attack
+          filt.type='lowpass';
+          // keep highs tame: start lower and open less
+          filt.frequency.setValueAtTime(380, t);
+          filt.frequency.exponentialRampToValueAtTime(1100, t+Math.min(0.06,dur*0.4));
+          g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t+0.012); g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+          p.pan.setValueAtTime(pan, t);
+          o1.connect(filt); o2.connect(filt); filt.connect(g).connect(p).connect(master);
+          o1.start(t); o2.start(t); o1.stop(t+dur+0.05); o2.stop(t+dur+0.05);
+        }catch{}
+      }
+      function impact(t, vol=0.14){
+        try{
+          // low, soft "thump": short sine with downward pitch + subtle filtered noise
+          const kickLen=0.11; const o=AC.createOscillator(); const g=AC.createGain();
+          o.type='sine'; o.frequency.setValueAtTime(210, t); o.frequency.exponentialRampToValueAtTime(140, t+kickLen*0.7);
+          g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t+0.012); g.gain.exponentialRampToValueAtTime(0.0001, t+kickLen);
+          o.connect(g).connect(master); o.start(t); o.stop(t+kickLen+0.02);
+
+          const nLen=0.06; const nBuf=AC.createBuffer(1, AC.sampleRate*nLen|0, AC.sampleRate); const ch=nBuf.getChannelData(0);
+          for(let i=0;i<ch.length;i++){ ch[i] = (Math.random()*2-1) * (1 - i/ch.length); }
+          const src=AC.createBufferSource(); src.buffer=nBuf; const ng=AC.createGain(); const lp=AC.createBiquadFilter(); const hp=AC.createBiquadFilter();
+          lp.type='lowpass'; lp.frequency.value=1200; hp.type='highpass'; hp.frequency.value=80;
+          ng.gain.setValueAtTime(vol*0.4, t); ng.gain.exponentialRampToValueAtTime(0.0001, t+nLen);
+          src.connect(lp).connect(hp).connect(ng).connect(master); src.start(t);
+        }catch{}
+      }
+      function playMergeSound(count, maxVal){
+        if(!AC) ensureAudio(); if(!AC || count<=0) return;
+        const now = AC.currentTime;
+        // small "pop" at merge moment
+        impact(now, 0.12 + Math.min(0.06, count*0.02));
+        // musical arpeggio in pentatonic scale, length by merges
+        const steps = Math.min(5, 2 + count);
+        const pent = [0,2,4,7,9];
+        // keep root in lower mid range to avoid piercing highs
+        const root = 52 + ((Math.max(1, Math.log2(Math.max(2,maxVal)))|0) % 7); // around E3..B3
+        for(let i=0;i<steps;i++){
+          const deg = pent[i % pent.length];
+          const midi = root + deg; // no octave lift to keep it mellow
+          const when = now + i*0.06;
+          const pan = (Math.random()*2-1)*0.2;
+          tone(when, midi, 0.14, 0.22, pan);
+        }
+      }
+
+      function rustle(t, vol=0.06){
+        try{
+          // short band-passed noise burst for swipe movement
+          const len=0.07; const buf=AC.createBuffer(1, AC.sampleRate*len|0, AC.sampleRate); const ch=buf.getChannelData(0);
+          for(let i=0;i<ch.length;i++){ ch[i] = (Math.random()*2-1) * (1 - i/ch.length); }
+          const src=AC.createBufferSource(); src.buffer=buf;
+          const bp=AC.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1100; bp.Q.value=0.7;
+          const g=AC.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t+len);
+          const p=AC.createStereoPanner(); p.pan.value=(Math.random()*2-1)*0.15;
+          src.connect(bp).connect(g).connect(p).connect(master); src.start(t);
+        }catch{}
+      }
+
+      function playGameOverSound(){
+        if(!AC) ensureAudio(); if(!AC) return;
+        const now = AC.currentTime;
+        // soft low thump
+        impact(now, 0.16);
+        // sustained minor triad in low-mid, then a brief downward cadence
+        const root = 48; // C3 vicinity
+        tone(now+0.02, root+0, 0.55, 0.18, -0.05);
+        tone(now+0.02, root+3, 0.55, 0.16,  0.00);
+        tone(now+0.02, root+7, 0.55, 0.15,  0.05);
+        tone(now+0.50, root-5, 0.32, 0.13, 0);
+        tone(now+0.66, root-8, 0.30, 0.12, 0);
+      }
+
+      function playWinSound(){
+        if(!AC) ensureAudio(); if(!AC) return;
+        const now = AC.currentTime;
+        // celebratory pentatonic run then a bright major chord
+        const root = 60; // C4
+        const seq = [0,2,4,7,9,12];
+        for(let i=0;i<seq.length;i++){
+          const when = now + i*0.06;
+          const pan = (Math.random()*2-1)*0.2;
+          tone(when, root+seq[i], 0.16, 0.22, pan);
+        }
+        tone(now+0.36, root+0, 0.60, 0.18, -0.05);
+        tone(now+0.36, root+4, 0.60, 0.17,  0.00);
+        tone(now+0.36, root+7, 0.60, 0.16,  0.05);
+      }
+
+      function playStartSound(){
+        if(!AC) ensureAudio(); if(!AC) return;
+        const now = AC.currentTime;
+        // gentle airy whoosh
+        try{
+          const len=0.12; const buf=AC.createBuffer(1, AC.sampleRate*len|0, AC.sampleRate); const ch=buf.getChannelData(0);
+          for(let i=0;i<ch.length;i++){ ch[i] = (Math.random()*2-1) * (1 - i/ch.length); }
+          const src=AC.createBufferSource(); src.buffer=buf; const bp=AC.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=900; bp.Q.value=0.7; const g=AC.createGain(); g.gain.value=0.06; const p=AC.createStereoPanner(); p.pan.value=(Math.random()*2-1)*0.1; src.connect(bp).connect(g).connect(p).connect(master); src.start(now);
+        }catch{}
+        // light ascending triad (major-ish) in mid range
+        const root = 60; // A3 region
+        tone(now+0.00, root+0, 0.14, 0.18, -0.03);
+        tone(now+0.06, root+4, 0.15, 0.18,  0.00);
+        tone(now+0.12, root+7, 0.18, 0.18,  0.03);
+      }
 
       function init(){
-        grid=Array.from({length:sz},()=>Array(sz).fill(0)); score=0; bestEl.textContent=best
+        grid=Array.from({length:sz},()=>Array(sz).fill(0)); score=0; bestEl.textContent=best; over=false; won=false
         spawn(); spawn(); render()
       }
       function spawn(){ const empty=[]; for(let r=0;r<sz;r++)for(let c=0;c<sz;c++) if(grid[r][c]===0) empty.push([r,c]); if(!empty.length) return; const [r,c]=empty[(Math.random()*empty.length)|0]; grid[r][c] = Math.random()<0.9?2:4; spawnPos=[r,c] }
@@ -112,9 +238,20 @@
           const dx = r2.left - r1.left, dy = r2.top - r1.top
           tile.style.transform = `translate(${dx}px, ${dy}px)`
         })
+        // subtle rustle on movement start
+        ensureAudio(); rustle(AC.currentTime, 0.05 + Math.min(0.05, actions.length*0.003))
+        const merges = actions.filter(a=>a.merge)
+        const maxVal = merges.length? Math.max(...merges.map(a=> ng[a.to[0]][a.to[1]])) : 0
         setTimeout(()=>{
           grid = ng
           popSet = new Set(actions.filter(a=>a.merge).map(a=> a.to.join(',')))
+          // play sound right as merged tiles "land"
+          playMergeSound(merges.length, maxVal)
+          // check win (tile >= 2048) once
+          if(!won){
+            let vmax=0; for(let r=0;r<sz;r++) for(let c=0;c<sz;c++) if(ng[r][c]>vmax) vmax=ng[r][c];
+            if(vmax>=2048){ ensureAudio(); playWinSound(); won=true; }
+          }
           spawn(); render(); checkEnd(); animating=false
         }, 130)
       }
@@ -123,21 +260,24 @@
         for(let r=0;r<sz;r++)for(let c=0;c<sz;c++) if(grid[r][c]===0) return
         for(let r=0;r<sz;r++)for(let c=0;c<sz-1;c++) if(grid[r][c]===grid[r][c+1]) return
         for(let c=0;c<sz;c++)for(let r=0;r<sz-1;r++) if(grid[r][c]===grid[r+1][c]) return
+        if(!over){ over=true; ensureAudio(); playGameOverSound(); }
         setTimeout(()=>alert('ゲームオーバー'), 10)
       }
 
-      document.addEventListener('keydown', e => { if(animating) return; const k=e.key; if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(k)){ e.preventDefault(); move({ArrowLeft:'L',ArrowRight:'R',ArrowUp:'U',ArrowDown:'D'}[k]) } })
+      document.addEventListener('keydown', e => { ensureAudio(); if(animating) return; const k=e.key; if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(k)){ e.preventDefault(); move({ArrowLeft:'L',ArrowRight:'R',ArrowUp:'U',ArrowDown:'D'}[k]) } })
       // touch
-      let sx,sy
-      board.addEventListener('touchstart', e => { const t=e.changedTouches[0]; sx=t.clientX; sy=t.clientY })
-      board.addEventListener('touchend', e => { if(animating) return; const t=e.changedTouches[0]; const dx=t.clientX-sx, dy=t.clientY-sy; if(Math.hypot(dx,dy)<24) return; const adx=Math.abs(dx), ady=Math.abs(dy); if(adx>ady) move(dx>0?'R':'L'); else move(dy>0?'D':'U') })
+      let sx,sy, touching=false
+      board.addEventListener('touchstart', e => { ensureAudio(); touching=true; const t=e.changedTouches[0]; sx=t.clientX; sy=t.clientY }, {passive:false})
+      board.addEventListener('touchmove', e => { if(e.cancelable) e.preventDefault() }, {passive:false})
+      board.addEventListener('touchend', e => { touching=false; if(animating) return; const t=e.changedTouches[0]; const dx=t.clientX-sx, dy=t.clientY-sy; if(Math.hypot(dx,dy)<24) return; const adx=Math.abs(dx), ady=Math.abs(dy); if(adx>ady) move(dx>0?'R':'L'); else move(dy>0?'D':'U') })
+      window.addEventListener('touchmove', e => { if(touching && e.cancelable) e.preventDefault() }, {passive:false})
+      window.addEventListener('touchend', () => { touching=false })
 
-      undoBtn.addEventListener('click', ()=>{ if(animating) return; if(prev){ grid=prev.grid.map(r=>r.slice()); score=prev.score; render() } })
-      newBtn.addEventListener('click', ()=>{ if(animating) return; init() })
+      undoBtn.addEventListener('click', ()=>{ ensureAudio(); if(animating) return; if(prev){ grid=prev.grid.map(r=>r.slice()); score=prev.score; render() } })
+      newBtn.addEventListener('click', ()=>{ ensureAudio(); if(animating) return; init(); playStartSound(); })
 
       init()
     })()
   </script>
 </body>
 </html>
-
