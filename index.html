@@ -3,21 +3,30 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#0b0e11" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="manifest" href="manifest.json" />
   <title>2048 — single file</title>
   <style>
     :root{--bg:#0b0e11;--board:#0f141a;--cell:#0b0f14;--text:#eaf1f7;--muted:#94a3b8}
     *{box-sizing:border-box}
     html,body{height:100%; overflow:hidden; overscroll-behavior-y: contain; overscroll-behavior: none}
     body{margin:0;display:grid;place-items:center;min-height:100vh;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Hiragino Sans',Meiryo,sans-serif}
+    .app{position:fixed;inset:0;overflow:hidden;display:grid;place-items:center}
     .wrap{width:min(92vw,540px);display:grid;gap:12px}
     header{display:flex;justify-content:space-between;align-items:end}
     h1{margin:0;font-weight:800}
     .scores{display:flex;gap:8px}
     .box{background:#111827;border:1px solid #1f2937;border-radius:8px;padding:8px 10px;text-align:center}
     .box b{display:block;font-size:22px}
-    .board{position:relative;background:var(--board);border:1px solid #1f2937;border-radius:10px;padding:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:10px;touch-action:none;overscroll-behavior:contain}
-    .cell{background:var(--cell);border:1px solid #111827;border-radius:8px;position:relative;aspect-ratio:1}
-    .tile{position:absolute;inset:0;display:grid;place-items:center;font-weight:800;font-size:28px;border-radius:8px;transition:transform .12s ease, opacity .12s ease;will-change:transform,opacity}
+    .board{position:relative;background:var(--board);border:1px solid #1f2937;border-radius:10px;padding:10px;display:grid;grid-template-columns:repeat(4,1fr);grid-auto-rows:1fr;gap:10px;touch-action:none;overscroll-behavior:contain;aspect-ratio:1}
+    .fx{position:absolute;inset:0;pointer-events:none}
+    .glow{box-shadow:0 0 14px rgba(255,255,255,0.25)}
+    .cell{background:var(--cell);border:1px solid #111827;border-radius:8px;position:relative;height:100%}
+    .tile{position:absolute;inset:0;display:grid;place-items:center;font-weight:800;border-radius:8px;transition:transform .12s ease, opacity .12s ease;will-change:transform,opacity}
+    .tile .emoji{font-size:clamp(22px,6.4vw,40px);line-height:1}
+    .tile .label{font-size:11px;opacity:.9;color:#e9f0ff;margin-top:2px}
     .tile.new{transform:scale(.4);opacity:0}
     .tile.pop{animation:pop .12s ease}
     @keyframes pop{from{transform:scale(1.06)}to{transform:scale(1)}}
@@ -25,9 +34,25 @@
     button{appearance:none;background:#0d1117;color:var(--text);border:1px solid #1f2937;border-radius:8px;padding:8px 10px;font-weight:700;cursor:pointer}
     button.primary{background:#f59e0b;color:#231504;border-color:transparent}
     .muted{color:var(--muted)}
+    /* Game over modal */
+    .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);display:grid;place-items:center;opacity:0;transition:opacity .15s ease;z-index:20}
+    .modal-backdrop.show{opacity:1}
+    .modal-card{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:18px 16px;min-width:min(88vw,360px);text-align:center;box-shadow:0 10px 24px rgba(0,0,0,.4);transform:translateY(6px) scale(.98);transition:transform .16s ease}
+    .modal-backdrop.show .modal-card{transform:translateY(0) scale(1)}
+    .modal-title{font-weight:800;font-size:20px;margin-bottom:6px}
+    .modal-sub{color:var(--muted);margin-bottom:14px}
+    .modal-actions{display:flex;gap:8px;justify-content:center}
+    .app.blurred{filter:blur(2px) grayscale(.12)}
+    /* Portrait lock hint: show only in installed PWA (standalone) */
+    .orient{display:none}
+    @media (display-mode: standalone) and (orientation:landscape){
+      .orient{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.7);color:#eaf1f7;z-index:9;font-weight:700}
+      .orient span{background:#111827;border:1px solid #1f2937;border-radius:10px;padding:12px 16px}
+    }
   </style>
 </head>
 <body>
+  <div class="app">
   <div class="wrap">
     <header>
       <h1>2048</h1>
@@ -36,29 +61,96 @@
         <div class="box"><div class="muted">BEST</div><b id="best">0</b></div>
       </div>
     </header>
-    <div class="board" id="board"></div>
+    <div class="board" id="board"><canvas id="fx" class="fx"></canvas></div>
     <div class="controls">
       <div class="muted">矢印キー / スワイプで移動</div>
       <div style="display:flex;gap:8px"><button id="undo">元に戻す</button><button id="new" class="primary">新しいゲーム</button></div>
     </div>
   </div>
+  </div>
+  <div class="orient"><span>縦向きでプレイしてください（Rotate to portrait）</span></div>
 
   <script>
     ;(() => {
       const board = document.getElementById('board'); const scoreEl = document.getElementById('score'); const bestEl = document.getElementById('best')
-      const undoBtn = document.getElementById('undo'); const newBtn = document.getElementById('new')
+      const undoBtn = document.getElementById('undo') || document.querySelector('#undo');
+      const newBtn = document.getElementById('new') || document.querySelector('#new');
       const sz=4
-      const colors = { 2:'#1f2937',4:'#334155',8:'#f59e0b',16:'#fb923c',32:'#f97316',64:'#ef4444',128:'#a78bfa',256:'#60a5fa',512:'#34d399',1024:'#22c55e',2048:'#eab308' }
-      let grid, score, best = +localStorage.getItem('2048_best')||0, prev=null
+      const colorsNormal = { 2:'#1f2937',4:'#334155',8:'#f59e0b',16:'#fb923c',32:'#f97316',64:'#ef4444',128:'#a78bfa',256:'#60a5fa',512:'#34d399',1024:'#22c55e',2048:'#eab308' }
+      const colorsHC = { 2:'#222222',4:'#2f6db3',8:'#b96500',16:'#0f8f5a',32:'#b32f5e',64:'#a05bd5',128:'#e67e22',256:'#1abc9c',512:'#e74c3c',1024:'#27ae60',2048:'#f1c40f' }
+      let theme = localStorage.getItem('2048_theme')||'normal'
+      const colorFor = v => (theme==='hc'? (colorsHC[v]||'#cccccc') : (colorsNormal[v]||'#a3e635'))
+            // Display themes (emojis + labels)
+      const ITEMS_THEMES = {
+        fruits: {
+          2:{e:'🍒',n:'Cherry'}, 4:{e:'🍋',n:'Lemon'}, 8:{e:'🍎',n:'Apple'}, 16:{e:'🍇',n:'Grapes'},
+          32:{e:'🍓',n:'Berry'}, 64:{e:'🍍',n:'Pine'}, 128:{e:'🥝',n:'Kiwi'}, 256:{e:'🍑',n:'Peach'},
+          512:{e:'🥭',n:'Mango'}, 1024:{e:'🍉',n:'Melon'}, 2048:{e:'🎂',n:'Cake'}, 4096:{e:'🍫',n:'Choco'}
+        },
+        wagashi: {
+          2:{e:'🍡',n:'Dango'}, 4:{e:'🍘',n:'Senbei'}, 8:{e:'🍵',n:'Matcha'}, 16:{e:'🥮',n:'Mooncake'},
+          32:{e:'🍡',n:'Hanami'}, 64:{e:'🍘',n:'Arare'}, 128:{e:'🍵',n:'Houji'}, 256:{e:'🥮',n:'Anko'},
+          512:{e:'🍡',n:'Mitarashi'}, 1024:{e:'🍘',n:'Okaki'}, 2048:{e:'🎍',n:'Kagami'}, 4096:{e:'🎎',n:'Hina'}
+        },
+        planets: {
+          2:{e:'🟤',n:'Mercury'}, 4:{e:'🟡',n:'Venus'}, 8:{e:'🌍',n:'Earth'}, 16:{e:'🔴',n:'Mars'},
+          32:{e:'🟠',n:'Jupiter'}, 64:{e:'🪐',n:'Saturn'}, 128:{e:'🟣',n:'Uranus'}, 256:{e:'🔵',n:'Neptune'},
+          512:{e:'🌑',n:'Luna'}, 1024:{e:'⭐',n:'Star'}, 2048:{e:'☀️',n:'Sun'}, 4096:{e:'✨',n:'Nova'}
+        },
+        cats: {
+          2:{e:'😺',n:'Kitty'}, 4:{e:'😸',n:'Happy'}, 8:{e:'😹',n:'LOL'}, 16:{e:'😻',n:'Loves'},
+          32:{e:'😼',n:'Smirk'}, 64:{e:'😽',n:'Kiss'}, 128:{e:'🙀',n:'Scream'}, 256:{e:'😿',n:'Sad'},
+          512:{e:'😾',n:'Angry'}, 1024:{e:'🐾',n:'Paws'}, 2048:{e:'🧶',n:'Yarn'}, 4096:{e:'🐟',n:'Treat'}
+        }
+      }
+      let itemTheme = 'numbers'
+      function themeLabel(key){ return key==='fruits'?'Fruits': key==='wagashi'?'Wagashi': key==='planets'?'Planets':'Cats' }
+      function tileHTML(v){ const M=ITEMS_THEMES[itemTheme]||{}; const t=M[v]; if(!t) return '<div class="emoji">✨</div><div class="label">'+v+'</div>'; return '<div class="emoji">'+t.e+'</div><div class="label">'+t.n+'</div>'; }
+      // override tileHTML to support pure numbers theme
+      tileHTML = function(v){ if(itemTheme==='numbers'){ return '<div class="emoji">'+v+'</div>'; } const M=ITEMS_THEMES[itemTheme]||{}; const t=M[v]; if(!t) return '<div class="emoji">✨</div><div class="label">'+v+'</div>'; return '<div class="emoji">'+t.e+'</div><div class="label">'+t.n+'</div>'; };
+      let grid, score, best = +localStorage.getItem('2048_best')||0
+      let history = []
+      const HISTORY_MAX = 32
       let spawnPos=null, popSet=new Set(), animating=false, over=false, won=false
+      // FX overlay canvas + particles + screen shake
+      const fx = document.getElementById('fx'); const fxc = fx.getContext('2d'); let particles=[]; let halos=[]; let shakeUntil=0, shakeAmp=0
+      function fxResize(){ const r = board.getBoundingClientRect(); const d=window.devicePixelRatio||1; fx.width = Math.max(1,r.width*d); fx.height = Math.max(1,r.height*d); fx.style.width = r.width+"px"; fx.style.height = r.height+"px"; fxc.setTransform(d,0,0,d,0,0) }
+      addEventListener('resize', fxResize); setTimeout(fxResize,0)
+      function burst(x,y,color,count=18){
+        for(let i=0;i<count;i++){
+          const a=Math.random()*Math.PI*2; const sp=1.2+Math.random()*2.2;
+          particles.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:1,color})
+        }
+        halos.push({x,y,r:10,life:1,color})
+      }
+      function hexToRGBA(hex, a){ const m=hex&&hex.match(/^#?([0-9a-f]{6})$/i); if(!m) return `rgba(255,255,255,${a})`; const n=parseInt(m[1],16); const r=(n>>16)&255,g=(n>>8)&255,b=n&255; return `rgba(${r},${g},${b},${a})` }
+      function startShake(ms=120, px=2){ const now=performance.now(); shakeUntil=Math.max(shakeUntil, now+ms); shakeAmp=Math.max(shakeAmp, px) }
+      function fxLoop(){
+        fxc.clearRect(0,0,fx.width,fx.height);
+        // halos first, to improve visibility on dark backgrounds
+        if(halos.length){
+          for(let i=halos.length-1;i>=0;i--){
+            const h=halos[i]; h.r+=2.4; h.life-=0.04; if(h.life<=0){ halos.splice(i,1); continue }
+            const grad = fxc.createRadialGradient(h.x,h.y, h.r*0.2, h.x,h.y, h.r);
+            grad.addColorStop(0, hexToRGBA(h.color, 0.20*h.life));
+            grad.addColorStop(1, hexToRGBA(h.color, 0));
+            fxc.fillStyle=grad; fxc.beginPath(); fxc.arc(h.x,h.y,h.r,0,Math.PI*2); fxc.fill();
+          }
+        }
+        if(particles.length){ fxc.globalCompositeOperation='lighter'; for(let i=particles.length-1;i>=0;i--){ const p=particles[i]; p.x+=p.vx; p.y+=p.vy; p.vx*=0.96; p.vy*=0.96; p.life-=0.03; if(p.life<=0){ particles.splice(i,1); continue } fxc.fillStyle = hexToRGBA(p.color, Math.max(0,p.life*0.9)); fxc.beginPath(); fxc.arc(p.x,p.y, 2.5+2.5*(1-p.life), 0, Math.PI*2); fxc.fill(); } fxc.globalCompositeOperation='source-over'; }
+        if(shakeUntil>performance.now()){ const a=shakeAmp; const dx=(Math.random()*2-1)*a, dy=(Math.random()*2-1)*a; board.style.transform = `translate3d(${dx}px,${dy}px,0)`; } else { board.style.transform='translate3d(0,0,0)'; shakeAmp=0; }
+        requestAnimationFrame(fxLoop) }
+      requestAnimationFrame(fxLoop)
 
       // --- Sound (WebAudio) — less mechanical, more juicy ---
       let AC=null, master=null, comp=null
+      const SFX = { muted:(localStorage.getItem('2048_muted')||'0')==='1', vol:Number(localStorage.getItem('2048_vol')||'0.24'), theme:localStorage.getItem('2048_snd_theme')||'soft', vibrate:(localStorage.getItem('2048_vibe')||'1')==='1' };
+      let activeVoices=[]; const MAX_VOICES=3;
       function ensureAudio(){
         try{
           if(!AC){
             AC = new (window.AudioContext||window.webkitAudioContext)();
-            master = AC.createGain(); master.gain.value = 0.24;
+            master = AC.createGain(); master.gain.value = SFX.muted? 0 : SFX.vol;
             comp = AC.createDynamicsCompressor();
             comp.threshold.value = -24; comp.knee.value=20; comp.ratio.value=4; comp.attack.value=0.003; comp.release.value=0.08;
             master.connect(comp).connect(AC.destination);
@@ -66,21 +158,28 @@
           if(AC.state==='suspended') AC.resume()
         }catch{}
       }
+      function applyMaster(){ if(master){ master.gain.value = SFX.muted? 0 : SFX.vol; } }
+      document.addEventListener('visibilitychange', ()=>{ if(!master) return; if(document.hidden){ master.gain.value = 0; } else { applyMaster(); } });
       function midiToFreq(n){ return 440 * Math.pow(2,(n-69)/12) }
       function tone(t, midi, dur, vol, pan=0){
         try{
+          if(activeVoices.length>=MAX_VOICES){ try{ activeVoices.shift()?.stop?.(t); }catch{} }
           const f=midiToFreq(midi); const o1=AC.createOscillator(), o2=AC.createOscillator();
           const g=AC.createGain(); const p=AC.createStereoPanner(); const filt=AC.createBiquadFilter();
-          o1.type='triangle'; o2.type='sine'; o1.frequency.setValueAtTime(f, t); o2.frequency.setValueAtTime(f*1.005, t);
-          // filter sweep for a soft attack
+          if(SFX.theme==='retro'){ o1.type='square'; o2.type='square'; }
+          else if(SFX.theme==='chime'){ o1.type='sine'; o2.type='triangle'; }
+          else { o1.type='triangle'; o2.type='sine'; }
+          o1.frequency.setValueAtTime(f, t); o2.frequency.setValueAtTime(f*1.005, t);
           filt.type='lowpass';
-          // keep highs tame: start lower and open less
-          filt.frequency.setValueAtTime(380, t);
-          filt.frequency.exponentialRampToValueAtTime(1100, t+Math.min(0.06,dur*0.4));
+          const f0 = SFX.theme==='retro'? 300 : (SFX.theme==='chime'? 450 : 380);
+          const f1 = SFX.theme==='retro'? 900 : (SFX.theme==='chime'? 1400 : 1100);
+          filt.frequency.setValueAtTime(f0, t);
+          filt.frequency.exponentialRampToValueAtTime(f1, t+Math.min(0.06,dur*0.4));
           g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t+0.012); g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
           p.pan.setValueAtTime(pan, t);
           o1.connect(filt); o2.connect(filt); filt.connect(g).connect(p).connect(master);
-          o1.start(t); o2.start(t); o1.stop(t+dur+0.05); o2.stop(t+dur+0.05);
+          o1.start(t); o2.start(t); const stopAt=t+dur+0.05; o1.stop(stopAt); o2.stop(stopAt);
+          activeVoices.push({ stop:(when)=>{ try{o1.stop(when);o2.stop(when);}catch{} } });
         }catch{}
       }
       function impact(t, vol=0.14){
@@ -103,7 +202,8 @@
         if(!AC) ensureAudio(); if(!AC || count<=0) return;
         const now = AC.currentTime;
         // small "pop" at merge moment
-        impact(now, 0.12 + Math.min(0.06, count*0.02));
+        const scale = Math.min(1, Math.log2(Math.max(2,maxVal))/11);
+        impact(now, (0.10 + Math.min(0.06, count*0.02)) * (0.9 + 0.6*scale));
         // musical arpeggio in pentatonic scale, length by merges
         const steps = Math.min(5, 2 + count);
         const pent = [0,2,4,7,9];
@@ -114,8 +214,10 @@
           const midi = root + deg; // no octave lift to keep it mellow
           const when = now + i*0.06;
           const pan = (Math.random()*2-1)*0.2;
-          tone(when, midi, 0.14, 0.22, pan);
+          const base = 0.18 + scale*0.12;
+          tone(when, midi, 0.14, base, pan);
         }
+        if(scale>=0.5 && navigator.vibrate && (localStorage.getItem('2048_vibe')||'1')==='1'){ try{ navigator.vibrate(10); }catch{} }
       }
 
       function rustle(t, vol=0.06){
@@ -177,18 +279,59 @@
         tone(now+0.12, root+7, 0.18, 0.18,  0.03);
       }
 
-      function init(){
-        grid=Array.from({length:sz},()=>Array(sz).fill(0)); score=0; bestEl.textContent=best; over=false; won=false
-        spawn(); spawn(); render()
+      // Group SFX into an easily-extractable API (for future sfx.js split)
+      const Snd = {
+        ensureAudio,
+        applyMaster,
+        playMergeSound,
+        playStartSound,
+        playWinSound,
+        playGameOverSound,
+        rustle,
+        startShake,
+        burst,
+        get AC(){ return AC },
+        get master(){ return master },
+        config: SFX,
+      };
+      // Expose for external override/swapping if needed
+      try{ window.Snd = Snd }catch{}
+
+      // Persistence helpers
+      function saveState(){
+        try{ localStorage.setItem('2048_state', JSON.stringify({ grid, score, best })) }catch{}
+      }
+      function loadState(){
+        try{
+          const raw = localStorage.getItem('2048_state'); if(!raw) return false;
+          const obj = JSON.parse(raw);
+          if(!obj || !Array.isArray(obj.grid)) return false;
+          if(obj.grid.length!==sz || obj.grid.some(row=>!Array.isArray(row)||row.length!==sz)) return false;
+          grid = obj.grid.map(row=> row.map(v=> +v||0));
+          score = +obj.score||0;
+          if(typeof obj.best==='number'){ best = Math.max(best, obj.best|0) }
+          bestEl.textContent=best;
+          return true;
+        }catch{ return false }
+      }
+      function clearState(){ try{ localStorage.removeItem('2048_state') }catch{} }
+
+      function init(fresh=false){
+        history.length = 0; over=false; won=false; bestEl.textContent=best;
+        if(!fresh && loadState()) { render(); return }
+        grid=Array.from({length:sz},()=>Array(sz).fill(0)); score=0;
+        spawn(); spawn(); render(); saveState();
       }
       function spawn(){ const empty=[]; for(let r=0;r<sz;r++)for(let c=0;c<sz;c++) if(grid[r][c]===0) empty.push([r,c]); if(!empty.length) return; const [r,c]=empty[(Math.random()*empty.length)|0]; grid[r][c] = Math.random()<0.9?2:4; spawnPos=[r,c] }
 
       function render(){
         board.innerHTML=''; scoreEl.textContent=score; if(score>best){ best=score; localStorage.setItem('2048_best',best); bestEl.textContent=best }
         for(let i=0;i<sz*sz;i++){ const cell=document.createElement('div'); cell.className='cell'; board.appendChild(cell) }
+        // keep fx canvas on top
+        board.appendChild(fx)
         for(let r=0;r<sz;r++)for(let c=0;c<sz;c++){
           const v=grid[r][c]; if(!v) continue
-          const el=document.createElement('div'); el.className='tile'; el.style.background=colors[v]||'#a3e635'; el.textContent=v
+          const el=document.createElement('div'); el.className='tile'; el.style.background=colorFor(v); el.innerHTML = tileHTML(v)
           if(spawnPos && spawnPos[0]===r && spawnPos[1]===c){ el.classList.add('new'); requestAnimationFrame(()=> el.classList.remove('new')) }
           if(popSet.has(r+","+c)){ requestAnimationFrame(()=> el.classList.add('pop')); setTimeout(()=> el&&el.classList&&el.classList.remove('pop'), 160) }
           board.children[r*sz+c].appendChild(el)
@@ -196,21 +339,33 @@
         spawnPos=null; popSet.clear()
       }
 
-      function move(dir){ // dir: 'L','R','U','D'
-        if(animating) return
-        prev = { grid: grid.map(row=>row.slice()), score }
-        const actions=[] // {from:[r,c], to:[r,c], merge:boolean}
+      // Pure logic: compute next grid, actions, and score delta without touching DOM or SFX
+      function computeMove(dir, srcGrid){
         const ng = Array.from({length:sz},()=>Array(sz).fill(0))
         const mergedFlag = Array.from({length:sz},()=>Array(sz).fill(false))
+        const actions=[] // {from:[r,c], to:[r,c], merge:boolean}
+        let scoreDelta = 0
         function processLine(indices){
-          const vals = indices.map(([r,c])=> grid[r][c])
+          const vals = indices.map(([r,c])=> srcGrid[r][c])
           const nonzero = []
           for(let i=0;i<vals.length;i++){ if(vals[i]) nonzero.push({v:vals[i], i}) }
           let write=0
           for(let k=0;k<nonzero.length;k++){
             const curv = nonzero[k].v
-            if(write>0){ const [pr,pc]=indices[write-1]; if(ng[pr][pc]===curv && !mergedFlag[pr][pc]){ ng[pr][pc]=curv*2; mergedFlag[pr][pc]=true; score+=curv*2; const [fr,fc]=indices[nonzero[k].i]; actions.push({from:[fr,fc], to:[pr,pc], merge:true}); continue } }
-            const [tr,tc]=indices[write]; ng[tr][tc]=curv; const [fr,fc]=indices[nonzero[k].i]; actions.push({from:[fr,fc], to:[tr,tc], merge:false}); write++
+            if(write>0){
+              const [pr,pc]=indices[write-1]
+              if(ng[pr][pc]===curv && !mergedFlag[pr][pc]){
+                ng[pr][pc]=curv*2; mergedFlag[pr][pc]=true; scoreDelta+=curv*2
+                const [fr,fc]=indices[nonzero[k].i]
+                actions.push({from:[fr,fc], to:[pr,pc], merge:true});
+                continue
+              }
+            }
+            const [tr,tc]=indices[write]
+            ng[tr][tc]=curv
+            const [fr,fc]=indices[nonzero[k].i]
+            actions.push({from:[fr,fc], to:[tr,tc], merge:false});
+            write++
           }
         }
         if(dir==='L'){
@@ -222,19 +377,30 @@
         }else if(dir==='D'){
           for(let c=0;c<sz;c++){ const idx = Array.from({length:sz},(_,r)=>[sz-1-r,c]); processLine(idx) }
         }
-        // moved?
-        let moved=false; for(let r=0;r<sz;r++) for(let c=0;c<sz;c++) if(ng[r][c]!==grid[r][c]){ moved=true; break }
-        if(!moved) return
+        let moved=false; for(let r=0;r<sz;r++) for(let c=0;c<sz;c++) if(ng[r][c]!==srcGrid[r][c]){ moved=true; break }
+        return { ng, actions, moved, scoreDelta }
+      }
 
-        // animate: translate tiles from from->to
+      function move(dir){ // dir: 'L','R','U','D'
+        if(animating) return
+        // compute next state (pure)
+        const { ng, actions, moved, scoreDelta } = computeMove(dir, grid)
+        if(!moved) return
+        // snapshot previous state for multi-undo (max HISTORY_MAX)
+        history.push({ grid: grid.map(row=>row.slice()), score })
+        if(history.length>HISTORY_MAX) history.shift()
+        // animate: translate tiles from from->to, minimizing layout reads
         animating=true
         const cells = [...board.children]
-        function cellRect([r,c]){ const el = cells[r*sz+c]; return el.getBoundingClientRect() }
+        // cache all cell rects once per move
+        const rects = cells.map(el => el.getBoundingClientRect())
+        const brect = board.getBoundingClientRect()
+        const cellRectCached = ([r,c]) => rects[r*sz+c]
         actions.forEach(a => {
           const srcCell = cells[a.from[0]*sz + a.from[1]]
           const tile = srcCell.querySelector('.tile')
           if(!tile) return
-          const r1 = cellRect(a.from), r2 = cellRect(a.to)
+          const r1 = cellRectCached(a.from), r2 = cellRectCached(a.to)
           const dx = r2.left - r1.left, dy = r2.top - r1.top
           tile.style.transform = `translate(${dx}px, ${dy}px)`
         })
@@ -244,7 +410,9 @@
         const maxVal = merges.length? Math.max(...merges.map(a=> ng[a.to[0]][a.to[1]])) : 0
         setTimeout(()=>{
           grid = ng
-          popSet = new Set(actions.filter(a=>a.merge).map(a=> a.to.join(',')))
+          score += scoreDelta
+          const mergeTargets = actions.filter(a=>a.merge)
+          popSet = new Set(mergeTargets.map(a=> a.to.join(',')))
           // play sound right as merged tiles "land"
           playMergeSound(merges.length, maxVal)
           // check win (tile >= 2048) once
@@ -252,7 +420,16 @@
             let vmax=0; for(let r=0;r<sz;r++) for(let c=0;c<sz;c++) if(ng[r][c]>vmax) vmax=ng[r][c];
             if(vmax>=2048){ ensureAudio(); playWinSound(); won=true; }
           }
-          spawn(); render(); checkEnd(); animating=false
+          // FX bursts and big-merge shake, using cached rects
+          for(const m of mergeTargets){
+            const val = ng[m.to[0]][m.to[1]];
+            const dest = cellRectCached(m.to);
+            const cx = (dest.left - brect.left) + dest.width/2;
+            const cy = (dest.top - brect.top) + dest.height/2;
+            burst(cx, cy, colorFor(val), Math.min(28, 10 + Math.log2(val||2)*4))
+          }
+          if(maxVal>=256){ startShake(120, Math.min(3, 1 + Math.floor(Math.log2(maxVal)/2))) }
+          spawn(); render(); checkEnd(); saveState(); animating=false
         }, 130)
       }
 
@@ -264,20 +441,101 @@
         setTimeout(()=>alert('ゲームオーバー'), 10)
       }
 
+      // Fancy in-app Game Over modal
+      function showGameOver(){
+        try{
+          const app = document.querySelector('.app');
+          const id='gameover'; const old=document.getElementById(id); if(old) old.remove();
+          if(app) app.classList.add('blurred');
+          const overlay=document.createElement('div'); overlay.id=id; overlay.className='modal-backdrop';
+          overlay.innerHTML = `
+            <div class="modal-card">
+              <div class="modal-title">ゲームオーバー</div>
+              <div class="modal-sub">スコア ${score} / ベスト ${best}</div>
+              <div class="modal-actions">
+                <button class="primary js-new">もう一度</button>
+                <button class="js-close">閉じる</button>
+              </div>
+            </div>`;
+          document.body.appendChild(overlay);
+          requestAnimationFrame(()=> overlay.classList.add('show'));
+          const close=()=>{ try{ if(app) app.classList.remove('blurred'); overlay.remove(); }catch{} };
+          overlay.addEventListener('click', e=>{ if(e.target===overlay) close(); });
+          overlay.querySelector('.js-close').addEventListener('click', close);
+          overlay.querySelector('.js-new').addEventListener('click', ()=>{ close(); init(); });
+        }catch{}
+      }
+      // Intercept native alert after game over to show modal instead
+      ;(function(){
+        try{
+          const nativeAlert = window.alert.bind(window);
+          window.alert = function(msg){
+            try{ if(over){ showGameOver(); return; } }catch{}
+            try{ nativeAlert(msg); }catch{}
+          }
+        }catch{}
+      })();
+
       document.addEventListener('keydown', e => { ensureAudio(); if(animating) return; const k=e.key; if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(k)){ e.preventDefault(); move({ArrowLeft:'L',ArrowRight:'R',ArrowUp:'U',ArrowDown:'D'}[k]) } })
-      // touch
-      let sx,sy, touching=false
-      board.addEventListener('touchstart', e => { ensureAudio(); touching=true; const t=e.changedTouches[0]; sx=t.clientX; sy=t.clientY }, {passive:false})
-      board.addEventListener('touchmove', e => { if(e.cancelable) e.preventDefault() }, {passive:false})
-      board.addEventListener('touchend', e => { touching=false; if(animating) return; const t=e.changedTouches[0]; const dx=t.clientX-sx, dy=t.clientY-sy; if(Math.hypot(dx,dy)<24) return; const adx=Math.abs(dx), ady=Math.abs(dy); if(adx>ady) move(dx>0?'R':'L'); else move(dy>0?'D':'U') })
-      window.addEventListener('touchmove', e => { if(touching && e.cancelable) e.preventDefault() }, {passive:false})
-      window.addEventListener('touchend', () => { touching=false })
+      // unified pointer (mouse + touch + pen)
+      let px, py, pActive = false, pId = null
+      board.addEventListener('pointerdown', e => {
+        ensureAudio();
+        pActive = true; pId = e.pointerId; px = e.clientX; py = e.clientY;
+        try{ board.setPointerCapture(e.pointerId) }catch{}
+      }, {passive:true})
+      board.addEventListener('pointermove', e => {
+        if(!pActive) return;
+        // prevent scroll/overscroll while swiping inside board
+        if(e.cancelable) e.preventDefault();
+      }, {passive:false})
+      const finishPointer = (e) => {
+        if(!pActive) return; pActive=false;
+        try{ board.releasePointerCapture(pId) }catch{}
+        if(animating) return;
+        const dx = e.clientX - px, dy = e.clientY - py
+        if(Math.hypot(dx,dy) < 24) return;
+        const adx=Math.abs(dx), ady=Math.abs(dy)
+        if(adx>ady) move(dx>0?'R':'L'); else move(dy>0?'D':'U')
+      }
+      board.addEventListener('pointerup', finishPointer, {passive:true})
+      board.addEventListener('pointercancel', ()=>{ pActive=false; }, {passive:true})
 
-      undoBtn.addEventListener('click', ()=>{ ensureAudio(); if(animating) return; if(prev){ grid=prev.grid.map(r=>r.slice()); score=prev.score; render() } })
-      newBtn.addEventListener('click', ()=>{ ensureAudio(); if(animating) return; init(); playStartSound(); })
-
+      if(undoBtn && typeof undoBtn.addEventListener==='function'){
+        undoBtn.addEventListener('click', ()=>{
+          ensureAudio(); if(animating) return;
+          const prev = history.pop();
+          if(prev){ grid=prev.grid.map(r=>r.slice()); score=prev.score; over=false; won=false; render(); saveState(); }
+        })
+      }
+      if(newBtn && typeof newBtn.addEventListener==='function'){
+        newBtn.addEventListener('click', ()=>{ ensureAudio(); if(animating) return; clearState(); init(true); playStartSound(); })
+      }
+      // Inject simple sound controls (mute/volume/theme/vibe)
+      ;(function(){
+        try{
+          const bar=document.querySelector('.controls > div:last-child'); if(!bar) return;
+          const wrap=document.createElement('div'); wrap.style.display='flex'; wrap.style.gap='6px'; wrap.style.alignItems='center';
+          // mute only
+          const mute=document.createElement('button'); mute.textContent = (localStorage.getItem('2048_muted')||'0')==='1'? 'Unmute':'Mute';
+          mute.onclick=()=>{ const m=(localStorage.getItem('2048_muted')||'0')==='1'; localStorage.setItem('2048_muted', m?'0':'1'); SFX.muted=!m; if(!AC) ensureAudio(); applyMaster(); mute.textContent=SFX.muted?'Unmute':'Mute'; };
+          wrap.appendChild(mute); bar.prepend(wrap);
+        }catch{}
+      })();
       init()
+      // PWA: service worker registration
+      if('serviceWorker' in navigator){
+        window.addEventListener('load', ()=>{
+          navigator.serviceWorker.register('sw.js').catch(()=>{});
+        });
+      }
     })()
   </script>
 </body>
 </html>
+
+
+
+
+
+
