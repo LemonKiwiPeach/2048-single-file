@@ -1,0 +1,11 @@
+{
+  "name": "2048 — Single File",
+  "short_name": "2048",
+  "start_url": "./2048 — single file.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0b0e11",
+  "theme_color": "#0b0e11",
+  "description": "Offline 2048 with sound & effects",
+  "orientation": "portrait"
+}
